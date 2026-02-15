@@ -426,7 +426,10 @@ configure_container() {
   # Gateway (only if static IP)
   CT_GATEWAY=""
   if [[ "$CT_IP" != "dhcp" ]]; then
+    echo -e "${TAB}${DIM}Enter the gateway IP without CIDR mask (e.g. 192.168.1.1).${CL}" >&2
     CT_GATEWAY=$(prompt_input "Gateway" "")
+    # Strip any accidental CIDR suffix — gateways are plain IPs
+    CT_GATEWAY="${CT_GATEWAY%%/*}"
   fi
 
   # Optional advanced network
@@ -504,7 +507,13 @@ create_container() {
   )
   [[ -n "${CT_DNS}" ]] && pct_cmd+=(-nameserver "$CT_DNS")
 
-  "${pct_cmd[@]}" >/dev/null 2>&1
+  local pct_output
+  if ! pct_output=$("${pct_cmd[@]}" 2>&1); then
+    msg_error "Failed to create container (CT ${CT_ID})"
+    echo -e "${TAB}${DIM}pct create output:${CL}" >&2
+    echo "$pct_output" >&2
+    exit 1
+  fi
   msg_ok "Created LXC container (CT ${CT_ID})"
 }
 
@@ -512,7 +521,10 @@ create_container() {
 
 start_container() {
   msg_info "Starting container"
-  pct start "$CT_ID" >/dev/null 2>&1
+  if ! pct start "$CT_ID" 2>&1; then
+    msg_error "Failed to start container ${CT_ID}"
+    exit 1
+  fi
 
   # Wait for the container to be fully running
   local wait=0
@@ -529,7 +541,7 @@ start_container() {
   # Wait for network inside the container
   msg_info "Waiting for network inside container"
   local net_wait=0
-  while ! pct exec "$CT_ID" -- bash -c "curl -fsSL --max-time 3 https://github.com >/dev/null 2>&1"; do
+  while ! pct exec "$CT_ID" -- bash -c "ping -c1 -W3 github.com >/dev/null 2>&1 || wget -q --spider --timeout=3 https://github.com 2>/dev/null"; do
     if [[ $net_wait -ge 60 ]]; then
       msg_error "Container has no network connectivity after 60 seconds"
       echo -e "${TAB}${DIM}Check your bridge/VLAN/firewall settings and try again.${CL}" >&2
@@ -563,8 +575,10 @@ run_installer() {
   echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CL}" >&2
   echo "" >&2
 
-  # Download the install script into the container and run it
+  # Ensure curl is available, then download and run the installer
   pct exec "$CT_ID" -- bash -c "
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq curl >/dev/null 2>&1
     curl -fsSL '${INSTALL_SCRIPT_URL}' -o /tmp/soulsync-install.sh
     chmod +x /tmp/soulsync-install.sh
     bash /tmp/soulsync-install.sh
