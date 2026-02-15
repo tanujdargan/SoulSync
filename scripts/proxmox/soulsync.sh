@@ -485,6 +485,8 @@ create_container() {
     net_str+=",ip=${CT_IP}"
     [[ -n "${CT_GATEWAY:-}" ]] && net_str+=",gw=${CT_GATEWAY}"
   fi
+  # Disable IPv6 to prevent SLAAC/DHCPv6 hangs that block container startup
+  net_str+=",ip6=manual"
   [[ -n "${CT_MTU}" ]] && net_str+=",mtu=${CT_MTU}"
   [[ -n "${CT_MAC}" ]] && net_str+=",hwaddr=${CT_MAC}"
   [[ -n "${CT_VLAN}" ]] && net_str+=",tag=${CT_VLAN}"
@@ -538,13 +540,19 @@ start_container() {
   done
   msg_ok "Container is running"
 
-  # Wait for network inside the container
+  # Wait for IPv4 connectivity (test raw IP first, avoids DNS dependency)
   msg_info "Waiting for network inside container"
   local net_wait=0
-  while ! pct exec "$CT_ID" -- bash -c "ping -c1 -W3 github.com >/dev/null 2>&1 || wget -q --spider --timeout=3 https://github.com 2>/dev/null"; do
+  while ! pct exec "$CT_ID" -- bash -c "
+    # Try raw IPv4 ping to Cloudflare DNS (no DNS needed)
+    ping -4 -c1 -W3 1.1.1.1 >/dev/null 2>&1 ||
+    # Fallback: try to TCP-connect to Google DNS port 53
+    bash -c 'echo >/dev/tcp/8.8.8.8/53' 2>/dev/null
+  "; do
     if [[ $net_wait -ge 60 ]]; then
       msg_error "Container has no network connectivity after 60 seconds"
       echo -e "${TAB}${DIM}Check your bridge/VLAN/firewall settings and try again.${CL}" >&2
+      echo -e "${TAB}${DIM}Debug: pct enter ${CT_ID}  then try  ping -4 1.1.1.1${CL}" >&2
       exit 1
     fi
     sleep 2
